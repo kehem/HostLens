@@ -1,4 +1,4 @@
-# async_scan.py
+# ASYNC SCAN
 
 An authorized asynchronous web service scanner for discovering hosts with open HTTP/HTTPS ports (80/443) with advanced reconnaissance capabilities.
 
