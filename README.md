@@ -1,10 +1,10 @@
-# ASYNC SCAN
+# async_scan.py
 
-An authorized asynchronous web service scanner for discovering hosts with open HTTP/HTTPS ports (80/443) with advanced reconnaissance capabilities.
+A fast and authorized port scanner for discovering hosts with open HTTP/HTTPS ports (80/443) using **masscan** for rapid port discovery, with advanced reconnaissance capabilities.
 
 ## Features
 
-- **Async Port Scanning**: High-performance concurrent port scanning with configurable worker threads
+- **Masscan-powered Scanning**: Ultra-fast port scanning using the masscan tool
 - **Flexible Input**: Supports CIDR notation, IP ranges, and single IPs
 - **Multiple Output Formats**: JSON and text output formats
 - **Split Output**: Optionally save separate result files for port 80 and port 443
@@ -16,13 +16,36 @@ An authorized asynchronous web service scanner for discovering hosts with open H
 ## Requirements
 
 - Python 3.7+
+- **masscan** - Ultra-fast port scanner (must be installed separately)
 - `aiohttp` - Async HTTP client library
 - `tqdm` - Progress bar library
 
 ## Installation
 
-### Using Virtual Environment (Recommended)
+### 1. Install Masscan
 
+**Ubuntu/Debian:**
+```bash
+sudo apt-get update
+sudo apt-get install masscan
+```
+
+**macOS (with Homebrew):**
+```bash
+brew install masscan
+```
+
+**From Source:**
+```bash
+git clone https://github.com/robertdavidgraham/masscan
+cd masscan
+make
+sudo make install
+```
+
+### 2. Install Python Dependencies
+
+Using Virtual Environment (Recommended):
 ```bash
 # Create and activate virtual environment
 python3 -m venv virtual
@@ -32,8 +55,7 @@ source virtual/bin/activate
 pip install aiohttp tqdm
 ```
 
-### Direct Installation
-
+Or directly:
 ```bash
 pip install aiohttp tqdm
 ```
@@ -56,8 +78,9 @@ python3 async_scan.py -i targets.txt -o results.json
 #### Scan Options
 
 - `--ports PORTS` - Comma-separated ports to scan (default: `80,443`)
-- `--timeout SECONDS` - Connection timeout in seconds (default: `2.0`)
-- `-w, --workers N` - Number of async workers for port scanning (default: `500`)
+- `--rate RATE` - Masscan scan rate in packets per second (default: `10000`)
+  - Lower values (1000-5000) for stealthy/stable scans
+  - Higher values (50000-100000) for aggressive scans
 
 #### Output Options
 
@@ -74,11 +97,13 @@ python3 async_scan.py -i targets.txt -o results.json
 
 - `--grab-titles` - Extract HTTP/HTTPS page titles
 - `--title-workers N` - Concurrency level for title grabbing (default: `200`)
+- `--title-timeout SECONDS` - Timeout for title requests (default: `2.0`)
 
 #### SSL Certificate Extraction
 
 - `--grab-cert` - Extract SSL certificate CN and SAN from HTTPS services
 - `--cert-workers N` - Thread workers for certificate extraction (default: `100`)
+- `--cert-timeout SECONDS` - Timeout for certificate operations (default: `3.0`)
 
 ## Examples
 
@@ -88,9 +113,9 @@ python3 async_scan.py -i targets.txt -o results.json
 python3 async_scan.py -i targets.txt -o results.json
 ```
 
-Scans targets for open ports 80 and 443.
+Scans targets for open ports 80 and 443 with default settings.
 
-### Example 2: Scan with All Enhancements
+### Example 2: Full Reconnaissance
 
 ```bash
 python3 async_scan.py \
@@ -98,27 +123,25 @@ python3 async_scan.py \
   -o results.json \
   --resolve-domains \
   --grab-titles \
-  --grab-cert \
-  --timeout 3.0 \
-  -w 1000
+  --grab-cert
 ```
 
-Performs full reconnaissance: port scanning, DNS resolution, title extraction, and certificate grabbing.
+Performs complete reconnaissance: port scanning, DNS resolution, title extraction, and certificate grabbing.
 
-### Example 3: Split Output by Port
+### Example 3: Aggressive Scan with Split Output
 
 ```bash
 python3 async_scan.py \
   -i targets.txt \
   -o results.json \
+  --rate 100000 \
   --split-output \
-  --save-combined \
   --grab-titles
 ```
 
-Creates `results_80.json`, `results_443.json`, and `results.json` with titles grabbed.
+Fast aggressive scan with split output files for ports 80 and 443.
 
-### Example 4: High-Speed Scan with Custom Ports
+### Example 4: Stealthy Scan
 
 ```bash
 python3 async_scan.py \
@@ -126,11 +149,24 @@ python3 async_scan.py \
   -o results.txt \
   --ports 80,443,8080,8443 \
   --format text \
-  -w 2000 \
-  --timeout 1.0
+  --rate 1000
 ```
 
-Scans multiple ports with text output and aggressive timing.
+Slow, stealthy scan on multiple ports with lower rate.
+
+### Example 5: Custom Ports with Certificate Extraction
+
+```bash
+python3 async_scan.py \
+  -i targets.txt \
+  -o results.json \
+  --ports 80,443,8080,8443 \
+  --grab-cert \
+  --grab-titles \
+  --cert-timeout 5.0
+```
+
+Scan custom ports and extract both certificates and titles with extended timeout.
 
 ## Input File Format
 
@@ -149,6 +185,7 @@ The input file should contain one target per line. Supported formats:
 
 # Comments (ignored)
 # This is a comment
+10.20.30.40
 ```
 
 ## Output Format
@@ -185,43 +222,62 @@ The input file should contain one target per line. Supported formats:
 
 ### For Large Target Lists
 
-Increase the number of workers to scan faster:
+Use aggressive rate to speed up scanning:
 
 ```bash
-python3 async_scan.py -i targets.txt -o results.json -w 2000
+python3 async_scan.py -i targets.txt -o results.json --rate 50000
 ```
 
 ### For Unreliable Networks
 
-Increase timeout to allow slower connections:
+Lower the rate to prevent packet loss:
 
 ```bash
-python3 async_scan.py -i targets.txt -o results.json --timeout 5.0
+python3 async_scan.py -i targets.txt -o results.json --rate 1000
 ```
 
-### For Resource-Constrained Systems
+### For Extended Timeouts
 
-Reduce workers and title grabbing concurrency:
+Increase title and certificate timeouts for slow servers:
 
 ```bash
-python3 async_scan.py -i targets.txt -o results.json -w 200 --title-workers 50
+python3 async_scan.py -i targets.txt -o results.json \
+  --grab-titles --grab-cert \
+  --title-timeout 5.0 --cert-timeout 5.0
 ```
 
 ## Error Handling
 
 The scanner handles various error conditions gracefully:
 
-- **Invalid IP formats**: Skips invalid entries and reports errors
-- **Network timeouts**: Treats as closed ports
+- **Masscan not found**: Script checks for masscan installation and provides install instructions
+- **Network timeouts**: Treated as closed ports
 - **SSL/TLS errors**: Continues scanning without certificate info
-- **DNS resolution failures**: Marks as None in output
+- **DNS resolution failures**: Marked as None in output
+- **Invalid IP formats**: Skipped with error reporting
+
+## Masscan Rate Guidelines
+
+- **1,000 pps**: Stealthy, targets single gateway (slow networks)
+- **10,000 pps** (default): Balanced, good for most networks
+- **50,000 pps**: Aggressive, enterprise networks
+- **100,000+ pps**: Very aggressive, local networks only
 
 ## Notes
 
 - **Authorization**: Ensure you have authorization before scanning any networks or systems
-- **Rate Limiting**: Network administrators may rate-limit requests. Adjust timeouts and workers accordingly
-- **DNS Lookups**: PTR resolution may be slow on large result sets; reduce `--dns-workers` if DNS queries fail
+- **Root Privileges**: Masscan may require root/sudo on some systems for raw socket access
+- **Rate Limiting**: Network administrators may block high-rate scans. Adjust rate accordingly
+- **DNS Lookups**: PTR resolution may be slow on large result sets
 - **Certificates**: Certificate extraction only works for servers with valid SSL configurations
+
+## Advantages Over Manual Scanning
+
+- **Speed**: 100x+ faster than manual socket scanning
+- **Efficiency**: Optimized C implementation vs. Python
+- **Scalability**: Can scan large networks quickly
+- **Flexibility**: Adjustable rate for different network conditions
+- **Reliability**: Proven tool in security industry
 
 ## License
 

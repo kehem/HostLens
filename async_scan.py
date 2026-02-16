@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-async_webscan.py
+async_scan.py
 
-Authorized async scanner for web services (80/443).
+Authorized scanner for web services using masscan for fast port discovery.
 
 Features:
-- Async port scanning with configurable workers
+- Fast port scanning using masscan
 - CIDR / range / single IP input
 - Progress bar
 - JSON / TEXT output
@@ -20,9 +20,12 @@ import asyncio
 import ipaddress
 import json
 import re
+import shutil
 import socket
 import ssl
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Optional
 
@@ -98,17 +101,128 @@ def load_targets(filename: str) -> List[str]:
 
 
 # ----------------------------
-# PORT CHECK
+# MASSCAN PORT SCANNING
 # ----------------------------
-async def check_port(ip: str, port: int, timeout: float) -> bool:
+def check_masscan_installed() -> str:
+    """Check if masscan is installed and return the path."""
+    import shutil
+    
+    # Try to find masscan in PATH
+    masscan_path = shutil.which("masscan")
+    if masscan_path:
+        return masscan_path
+    
+    # Try common installation paths
+    common_paths = [
+        "/usr/bin/masscan",
+        "/usr/local/bin/masscan",
+        "/snap/bin/masscan",
+        "/opt/masscan/bin/masscan"
+    ]
+    
+    for path in common_paths:
+        if Path(path).exists():
+            return path
+    
+    return None
+
+
+def run_masscan(targets: List[str], ports: Tuple[int, ...], rate: int = 10000) -> Dict[str, List[int]]:
+    """
+    Run masscan to scan ports and return results.
+    Returns: { "ip": [open_ports] }
+    """
+    masscan_path = check_masscan_installed()
+    if not masscan_path:
+        print("[!] Error: masscan is not installed or not in PATH")
+        print("Install masscan:")
+        print("  Ubuntu/Debian: sudo apt-get install masscan")
+        print("  macOS: brew install masscan")
+        print("  From source: https://github.com/robertdavidgraham/masscan")
+        sys.exit(1)
+
+    # Create temporary directory (more reliable permissions with sudo)
+    temp_dir = tempfile.mkdtemp(prefix="masscan_")
+    targets_file = Path(temp_dir) / "targets.txt"
+    output_file = Path(temp_dir) / "output.json"
+
     try:
-        conn = asyncio.open_connection(ip, port)
-        reader, writer = await asyncio.wait_for(conn, timeout=timeout)
-        writer.close()
-        await writer.wait_closed()
-        return True
-    except Exception:
-        return False
+        # Write targets file
+        with open(targets_file, 'w') as f:
+            for target in targets:
+                f.write(target + '\n')
+
+        ports_str = ','.join(str(p) for p in ports)
+
+        cmd = [
+            masscan_path,
+            "-iL", str(targets_file),
+            "-p", ports_str,
+            "-oJ", str(output_file),
+            "--rate", str(rate),
+        ]
+
+        print(f"[+] Running masscan (found at {masscan_path})...")
+        
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=None)
+        except subprocess.CalledProcessError as e:
+            # Try with sudo if it fails (common for raw socket access)
+            print("[!] Masscan requires root privileges, attempting with sudo...")
+            cmd = ["sudo"] + cmd
+            try:
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=None, stdin=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as e:
+                error_msg = e.stderr if e.stderr else e.stdout if e.stdout else str(e)
+                print(f"[!] Masscan error: {error_msg}", file=sys.stderr)
+                raise
+
+        # Parse JSON output
+        results: Dict[str, List[int]] = {}
+        
+        if not output_file.exists():
+            print("[!] Warning: No output file generated. Masscan may have found no open ports.", file=sys.stderr)
+            return results
+            
+        try:
+            with open(output_file, 'r') as f:
+                output_text = f.read().strip()
+            
+            # Handle NDJSON format (newline-delimited JSON)
+            if not output_text:
+                return results
+            
+            for line in output_text.split('\n'):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    
+                    # Each entry has format: {"ip": "...", "ports": [{"port": ..., "proto": ..., "status": ...}, ...]}
+                    if "ip" in entry and "ports" in entry:
+                        ip = entry["ip"]
+                        open_ports = []
+                        
+                        for port_info in entry["ports"]:
+                            if port_info.get("status") == "open":
+                                open_ports.append(port_info.get("port"))
+                        
+                        if open_ports:
+                            results[ip] = sorted(open_ports)
+                
+                except json.JSONDecodeError as e:
+                    # Skip malformed lines
+                    pass
+
+        except Exception as e:
+            print(f"[!] Error parsing masscan output: {e}", file=sys.stderr)
+
+        return results
+
+    finally:
+        # Cleanup temp directory
+        import shutil as sh
+        sh.rmtree(temp_dir, ignore_errors=True)
 
 
 # ----------------------------
@@ -262,71 +376,26 @@ def resolve_cert_info(results: List[Dict], timeout: float, max_workers: int = 10
 # ----------------------------
 # SCANNING CORE
 # ----------------------------
-async def scan_ip(ip: str, ports: Tuple[int, ...], timeout: float) -> Dict:
-    open_ports = []
-    for port in ports:
-        if await check_port(ip, port, timeout):
-            open_ports.append(port)
+def scan_with_masscan(targets: List[str], ports: Tuple[int, ...], rate: int) -> List[Dict]:
+    """
+    Run masscan and convert results to internal format.
+    """
+    masscan_results = run_masscan(targets, ports, rate=rate)
 
-    return {
-        "ip": ip,
-        "open_ports": open_ports,
-        "has_web": bool(open_ports),
-        "has_80": 80 in open_ports,
-        "has_443": 443 in open_ports,
-        "ptr_domain": None,
-        "http_title": None,
-        "https_title": None,
-        "ssl_cn": None,
-        "ssl_san": []
-    }
-
-
-async def worker(queue: asyncio.Queue,
-                 ports: Tuple[int, ...],
-                 timeout: float,
-                 results: List[Dict],
-                 pbar):
-    while True:
-        ip = await queue.get()
-
-        if ip is None:
-            queue.task_done()
-            break
-
-        try:
-            res = await scan_ip(ip, ports, timeout)
-            if res["has_web"]:
-                results.append(res)
-        finally:
-            pbar.update(1)
-            queue.task_done()
-
-
-async def run_scan(targets: List[str],
-                   ports: Tuple[int, ...],
-                   timeout: float,
-                   workers: int) -> List[Dict]:
-
-    queue: asyncio.Queue = asyncio.Queue()
-    results: List[Dict] = []
-
-    for ip in targets:
-        queue.put_nowait(ip)
-
-    with tqdm(total=len(targets), desc="Scanning Ports", unit="ip") as pbar:
-        tasks = [
-            asyncio.create_task(worker(queue, ports, timeout, results, pbar))
-            for _ in range(workers)
-        ]
-
-        for _ in range(workers):
-            queue.put_nowait(None)
-
-        await queue.join()
-
-        for t in tasks:
-            await t
+    results = []
+    for ip, open_ports in masscan_results.items():
+        results.append({
+            "ip": ip,
+            "open_ports": open_ports,
+            "has_web": bool(open_ports),
+            "has_80": 80 in open_ports,
+            "has_443": 443 in open_ports,
+            "ptr_domain": None,
+            "http_title": None,
+            "https_title": None,
+            "ssl_cn": None,
+            "ssl_san": []
+        })
 
     return results
 
@@ -408,7 +477,7 @@ def build_split_name(base_output: str, suffix: str) -> str:
 # ----------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Authorized async scanner for 80/443 + PTR + HTTP titles + SSL CN/SAN."
+        description="Fast scanner for 80/443 using masscan + PTR + HTTP titles + SSL CN/SAN."
     )
 
     parser.add_argument("-i", "--input", required=True, help="Input file with targets")
@@ -416,11 +485,9 @@ def main():
 
     parser.add_argument("--ports", default="80,443",
                         help="Comma-separated ports (default: 80,443)")
-    parser.add_argument("--timeout", type=float, default=2.0,
-                        help="Timeout seconds (default: 2.0)")
 
-    parser.add_argument("-w", "--workers", type=int, default=500,
-                        help="Async scan workers (default: 500)")
+    parser.add_argument("--rate", type=int, default=10000,
+                        help="Masscan rate (packets per second, default: 10000)")
 
     parser.add_argument("--format", choices=["json", "text"], default="json",
                         help="Output format (default: json)")
@@ -445,12 +512,18 @@ def main():
     parser.add_argument("--title-workers", type=int, default=200,
                         help="Concurrency for title grabbing (default: 200)")
 
+    parser.add_argument("--title-timeout", type=float, default=2.0,
+                        help="Timeout for title grabbing (default: 2.0)")
+
     # SSL cert info
     parser.add_argument("--grab-cert", action="store_true",
                         help="Extract SSL certificate CN + SAN from port 443")
 
     parser.add_argument("--cert-workers", type=int, default=100,
                         help="Thread workers for SSL certificate grabbing (default: 100)")
+
+    parser.add_argument("--cert-timeout", type=float, default=3.0,
+                        help="Timeout for certificate grabbing (default: 3.0)")
 
     args = parser.parse_args()
 
@@ -466,12 +539,11 @@ def main():
 
         print(f"[+] Targets loaded: {len(targets)}")
         print(f"[+] Ports: {ports}")
-        print(f"[+] Timeout: {args.timeout}s")
-        print(f"[+] Scan workers: {args.workers}")
+        print(f"[+] Masscan rate: {args.rate} pps")
         print(f"[+] Format: {args.format}")
         print("")
 
-        results = asyncio.run(run_scan(targets, ports, args.timeout, args.workers))
+        results = scan_with_masscan(targets, ports, rate=args.rate)
 
         print(f"\n[+] Found {len(results)} hosts with open ports.")
 
@@ -479,10 +551,10 @@ def main():
             resolve_ptr_domains(results, max_workers=args.dns_workers)
 
         if args.grab_titles and results:
-            asyncio.run(grab_titles(results, timeout=args.timeout, workers=args.title_workers))
+            asyncio.run(grab_titles(results, timeout=args.title_timeout, workers=args.title_workers))
 
         if args.grab_cert and results:
-            resolve_cert_info(results, timeout=args.timeout, max_workers=args.cert_workers)
+            resolve_cert_info(results, timeout=args.cert_timeout, max_workers=args.cert_workers)
 
         # OUTPUT
         if args.split_output:
